@@ -1,0 +1,400 @@
+---
+title: "How 'Bout 'Dem Apples: Has Modern Agriculture Made Apple Cultivars More Related And Less Genetically Diverse?"
+author: "\\vspace{-4truemm}Michael Jordan"
+fontsize: 11pt
+header-includes: 
+  \usepackage{geometry}
+  \geometry{top=2.5cm,left=2.5cm,bottom=2.5cm,right=2.5cm}
+  \usepackage{titling}
+  \setlength{\droptitle}{-5em} 
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    fig_caption: true
+mainfont: FreeSerif
+urlcolor: blue
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+\vspace{-15truemm}
+## Abstract
+
+This paper uses a data set of single nucleotide polymorphisms (SNPs) from Canada's Apple Biodiversity Collection (ABC) to assess whether apple cultivars have become more related and less genetically diverse.
+
+## Introduction
+
+```{r import, include=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+# Set working directory.
+setwd("/home/skirnir314/EECMSc/AppleProject")
+
+# Load libraries
+library(readxl)
+library(dplyr)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(scales)
+library(cowplot)
+library(stringr)
+
+# NOTE: All data required to Knit this Rmd are available in the github
+# directory. Some of those data are taken directly from online sources. However,
+# some are derived using two other files: PloidismExploration.R and 
+# PlinkRuns.R files. PloidismExploration.R does not require any additional files
+# to execute. But, PlinkRuns.R does. This is because it is operating on SNP data
+# files that are too large to upload to github. Directions for downloading and
+# extracting those files are at the top of PlinkRuns.R.
+```
+
+The domestic apple (*Malus domestica*) is one of the oldest, most commonly cultivated, and most valuable fruit crops in the world, ranking second only to the banana in gross production value (O'Rourke, 2021). Although today *M. domestica* is produced by many countries such as America, Chile, and New Zealand, it originated in Central Asia and evolved from other *Malus* species, primarily *M. sieversii* (Volk et al., 2021). Following domestication, *M. domestica* spread from Asia along the Silk Road to Europe and beyond (Volk et al., 2021).
+
+As *M. domestica* spread, trees with desirable traits were developed as cultivars through vegetative propagation (Volk et al., 2021). Asexual reproduction was necessary because apples are typically self-incompatible and highly heterozygous, meaning that cultivars must be cross-bred  and offspring will exhibit traits not expressed in either parent tree (Volk et al., 2021). Therefore, asexual reproduction was required to maintain desirable traits.
+
+Prior to the industrial era apple production was regional, with small farms choosing new cultivars to develop largely through trial and error or chance pollination events (O'Rourke, 2021). After industrialization the industry became increasingly structured, complex, and globally integrated as new technology allowed apples to be sold over greater distances, leading to the large vertically integrated firms of today (O'Rourke, 2021). As industry organization became more sophisticated, so to did apple breeding strategies. Controlled breeding programs were established by the early 1800s (Khan et al., 2021), during the 20th century the apple industry embraced genomics, and today it uses modern technologies like SNP arrays to develop new cultivars (Volk et al., 2021).
+
+Although these structural and technological developments facilitated a large globally connected industry, this may have come at the cost of genetic diversity. Research has shown that many accessions in collections are clonally related to just a few commercially dominant cultivars (Migicovsky et al., 2021). I hypothesize that this is a recent phenomenon, with apple cultivars becoming more related and less genetically diverse over time as the industry has consolidated and used more sophisticated techniques to select for traits desired by the global market. If so, this would support the continued maintenance of heritage cultivars as an important reservoir of potentially valuable genotypes.
+
+## Methods
+
+```{r import_and_clean_data, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+# Import apple access phenotype metadata.
+apple.p.metadata <- readxl::read_excel(
+  "./Data/Phenomics/20201102_meta_data.xlsx")
+
+# Combine discovery and release year.
+apple.p.metadata$Year <- apply(
+  apple.p.metadata[, c("Discovered/described/cultivated", "Release Year")],
+  1,
+  function(x) ifelse(is.na(x[1]) & is.na(x[2]), NA, min(x, na.rm = TRUE)))
+apple.p.metadata$Year <- as.numeric(apple.p.metadata$Year)
+
+# Aggregate plant id and cultivar to one field
+apple.p.metadata$Cultivar.New <- apply(
+  apple.p.metadata[, c("PLANTID", "Cultivar")],
+  1,
+  function(x) ifelse(x[1] == "NA", x[2], x[1])
+)
+
+# Filter for only malus domestica accessions with a year, drop irrelevant
+# columns, and rename cultivar variable.
+apple.p.metadata <- apple.p.metadata[
+  apple.p.metadata$species == "domestica" &
+  !is.na(apple.p.metadata$Year),
+  c("apple_id", "Cultivar.New", "Year", "Country", "Use", "type")]
+names(apple.p.metadata)[
+  names(apple.p.metadata) == "Cultivar.New"] <- "Cultivar"
+
+# Filter for years since 1800 and add a column for time period
+apple.p.metadata <- apple.p.metadata[apple.p.metadata$Year >= 1800, ]
+apple.p.metadata$Period <- apply(
+  apple.p.metadata[, c("Year")],
+  1,
+  function(x) ifelse(
+    x[1] >= 1800 & x[1] < 1900,
+    1,
+    ifelse(x[1] >= 1900 & x[1] < 1960, 2, 3))
+)
+
+# Filter out accessions that are likely to be triploid.
+# These get derived in the PloidismExploration.R script.
+triploids <- read.csv("./Data/polyploid.ids.csv", header = TRUE)
+apple.p.metadata <- apple.p.metadata[
+  !(apple.p.metadata$apple_id %in% unlist(triploids)), ]
+
+# Convert to DF and create one TSV files with accession numbers for each time
+# period to use when filtering IBD runs in Plink
+apple.p.metadata <- as.data.frame(apple.p.metadata)
+keep.p1 <- data.frame(
+  PID = sort(apple.p.metadata[apple.p.metadata$Period == 1, c("apple_id")]))
+keep.p1$IID <- sort(
+  apple.p.metadata[apple.p.metadata$Period == 1, c("apple_id")])
+keep.p2 <- data.frame(
+  PID = sort(apple.p.metadata[apple.p.metadata$Period == 2, c("apple_id")]))
+keep.p2$IID <- sort(
+  apple.p.metadata[apple.p.metadata$Period == 2, c("apple_id")])
+keep.p3 <- data.frame(
+  PID = sort(apple.p.metadata[apple.p.metadata$Period == 3, c("apple_id")]))
+keep.p3$IID <- sort(
+  apple.p.metadata[apple.p.metadata$Period == 3, c("apple_id")])
+
+# Write keep files to TSV
+write.table(keep.p1, "./Data/keep.p1.tsv", sep = "\t", row.names = FALSE)
+write.table(keep.p2, "./Data/keep.p2.tsv", sep = "\t", row.names = FALSE)
+write.table(keep.p3, "./Data/keep.p3.tsv", sep = "\t", row.names = FALSE)
+
+# Import ibd results
+p1.ibd <- read.table("./Data/Snps/p1_ibd.genome", header = TRUE)
+p2.ibd <- read.table("./Data/Snps/p2_ibd.genome", header = TRUE)
+p3.ibd <- read.table("./Data/Snps/p3_ibd.genome", header = TRUE)
+
+# Import log files and extract SNP and accession counts.
+p1.log <- read.delim("./Data/Snps/p1_ibd.log")
+p2.log <- read.delim("./Data/Snps/p2_ibd.log")
+p3.log <- read.delim("./Data/Snps/p3_ibd.log")
+
+```
+
+The data and code behind this report can be found at https://github.com/Skirnir3141/AppleProject. To evaluate my hypothesis, I used a [data set](https://datadryad.org/stash/dataset/doi:10.5061/dryad.zkh1893cd) of 278,231 SNPs from 1,175 accessions in Canada's Apple Biodiversity Collection (ABC) (Migicovsky et al., 2022). To describe these accessions, I used a [data set](https://github.com/MylesLab/abc-phenomics) from a phenomic review of the ABC (Watts et al., 2022). I filtered accessions using `r substring(R.Version()$version.string, 1, 15)` to include only *M. domestica* with either a cultivation or a release year (earliest was used). Because SNP data did not account for non-diploids, I dropped triploids by using the het function in Plink v1.90 to estimate heterozygosity and filtering out high values (see PloidismExploration.R). This resulted in `r nrow(apple.p.metadata)` remaining accessions, which I split into three time periods -- 1800-1899, 1900-1959, and 1960-Present -- reflecting stages in apple industry development.
+
+SNP quality control was conducted in Plink. SNPs were pruned for linkage disequilibrium (indep-pairwise 10 3 .05). SNPs with a minor allele frequency of less than .01 and a missingness of greater than .05 were removed. Accessions with greater than .1 missingness were removed. This resulted in `r prettyNum(as.numeric(stringr::word(p1.log[33, 1], 1)), big.mark = ",", scientific = FALSE)` SNPS and `r prettyNum(as.numeric(stringr::word(p1.log[33, 1], 4)), big.mark = ",", scientific = FALSE)` accessions for P1, `r prettyNum(as.numeric(stringr::word(p2.log[33, 1], 1)), big.mark = ",", scientific = FALSE)` SNPs and `r prettyNum(as.numeric(stringr::word(p2.log[33, 1], 4)), big.mark = ",", scientific = FALSE)` accessions for P2, and `r prettyNum(as.numeric(stringr::word(p3.log[33, 1], 1)), big.mark = ",", scientific = FALSE)` SNPs and `r prettyNum(as.numeric(stringr::word(p3.log[33, 1], 4)), big.mark = ",", scientific = FALSE)` accessions for P3.
+
+To evaluate relatedness, I estimated identity by descent (IBD) using Plink. Accessions with a $\hat{\pi}$ (proportion of inheritance) greater than .125 (a 3rd degree relationships or closer) were considered related. Related accessions were visualized using the tidygraph and ggraph R packages with a Fruchterman-Reingold (FR) layout algorithm using $\hat{\pi}$ as a weight. To evaluate genetic diversity, I calculated the genetic hamming distance (i.e., the percentage of SNPs that differ) using Plink and conducted PCoA with the cmdscale function in R.
+
+## Results
+```{r import_ibd, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+
+# Add cultivar names for each accession ID
+map <- apple.p.metadata[, c("apple_id", "Cultivar")]
+p1.ibd <- dplyr::left_join(p1.ibd, map, by = join_by(IID1 == apple_id))
+names(p1.ibd)[names(p1.ibd) == "Cultivar"] <- "Cultivar1"
+p1.ibd <- dplyr::left_join(p1.ibd, map, by = join_by(IID2 == apple_id))
+names(p1.ibd)[names(p1.ibd) == "Cultivar"] <- "Cultivar2"
+p2.ibd <- dplyr::left_join(p2.ibd, map, by = join_by(IID1 == apple_id))
+names(p2.ibd)[names(p2.ibd) == "Cultivar"] <- "Cultivar1"
+p2.ibd <- dplyr::left_join(p2.ibd, map, by = join_by(IID2 == apple_id))
+names(p2.ibd)[names(p2.ibd) == "Cultivar"] <- "Cultivar2"
+p3.ibd <- dplyr::left_join(p3.ibd, map, by = join_by(IID1 == apple_id))
+names(p3.ibd)[names(p3.ibd) == "Cultivar"] <- "Cultivar1"
+p3.ibd <- dplyr::left_join(p3.ibd, map, by = join_by(IID2 == apple_id))
+names(p3.ibd)[names(p3.ibd) == "Cultivar"] <- "Cultivar2"
+
+#creat node and edge objects for network graphing
+p1.nodes <- data.frame(Cultivar = unique(c(p1.ibd$Cultivar1, p1.ibd$Cultivar2)))
+p1.edges <- p1.ibd[p1.ibd$PI_HAT > .125, c("Cultivar1", "Cultivar2", "PI_HAT")]
+names(p1.edges) <- c("from", "to", "weight")
+p2.nodes <- data.frame(Cultivar = unique(c(p2.ibd$Cultivar1, p2.ibd$Cultivar2)))
+p2.edges <- p2.ibd[p2.ibd$PI_HAT > .125, c("Cultivar1", "Cultivar2", "PI_HAT")]
+names(p2.edges) <- c("from", "to", "weight")
+p3.nodes <- data.frame(Cultivar = unique(c(p3.ibd$Cultivar1, p3.ibd$Cultivar2)))
+p3.edges <- p3.ibd[p3.ibd$PI_HAT > .125, c("Cultivar1", "Cultivar2", "PI_HAT")]
+names(p3.edges) <- c("from", "to", "weight")
+
+# Create graph objects of IBD networks.
+p1.graph <- tidygraph::as_tbl_graph(
+  p1.edges,
+  directed = FALSE,
+  node_key = "Cultivar",
+  nodes = p1.nodes)
+p2.graph <- tidygraph::as_tbl_graph(
+  p2.edges,
+  directed = FALSE,
+  node_key = "Cultivar",
+  nodes = p2.nodes)
+p3.graph <- tidygraph::as_tbl_graph(
+  p3.edges,
+  directed = FALSE,
+  node_key = "Cultivar",
+  nodes = p3.nodes)
+
+# Load genetic distance data
+dist <- read.table("./Data/Snps/pca.mdist", header = F)
+PID <- data.frame(
+  PID = read.table("./Data/Snps/pca.mdist.id", header = F)[, 1])
+IID <- data.frame(
+  IID = read.table("./Data/Snps/pca.mdist.id", header = F)[, 2])
+
+# Perform PCoA
+mds <- cmdscale(dist, eig = T, 5)
+
+# Extract eigen vectors and bind with IDs and period
+eigenvec <- cbind(PID, IID, mds$points)
+map2 <- apple.p.metadata[, c("apple_id", "Period")]
+eigenvec <- dplyr::left_join(eigenvec, map2, by = join_by(IID == apple_id))
+
+# Calculate proportion of variation captured by each eigenvector
+eigen.perc <- round(((mds$eig) / sum(mds$eig)) * 100, 2)
+```
+
+Per Figure 1a, the percentage of accessions with at least one 3rd degree or closer relationship increased from `r scales::percent(round(nrow(as_tibble(activate(p1.graph, nodes))) / nrow(p1.nodes), digits = 2))` in P1 to `r scales::percent(round(nrow(as_tibble(activate(p2.graph, nodes))) / nrow(p2.nodes), digits = 2))` in P2 and to `r scales::percent(round(nrow(as_tibble(activate(p3.graph, nodes))) / nrow(p3.nodes), digits = 2))` in P3. The relatedness of accessions with at least one relationship also increased. This can be seen visually in Figures 1b-d. The FR algorithm will place more related accessions closer together and increased node density is evident across periods. Extracting global efficiency scores -- which are inversely related to the distance between nodes -- confirms this. Global efficiency increased from `r scales::percent(round(igraph::global_efficiency(p1.graph), digits = 2))` in P1 to `r scales::percent(round(igraph::global_efficiency(p2.graph), digits = 2))` in P2 and to `r scales::percent(round(igraph::global_efficiency(p3.graph), digits = 2))` in P3, indicating shorter distances between nodes. Figures 1b-d also exhibit higher connectivity over time. Average node degree increased from `r round(mean(degree(p1.graph)), digits = 1)` in P1 to `r round(mean(degree(p2.graph)), digits = 1)` in P2 and to `r round(mean(degree(p3.graph)), digits = 1)` in P3.
+
+In contrast, genetic diversity did not decrease. Per Figure 1e, a PCoA of genetic distance shows no notable difference across periods. In this PCoA, accessions with a similar genetic distance will be grouped closer together. The graph clearly shows that accessions in all three periods occupy a roughly contiguous area of graph space, with no changes in density or different groupings evident across periods.
+
+``` {r graph_networks, echo=FALSE, fig.align="center", fig.height=3, fig.cap="(a) Bar plot of accessions with 0 and >= 1 relationship by period, (b-d) Network graphs of related accessions for each period, (e) PCoA of genetic distance.", error=FALSE, warning=FALSE, message=FALSE}
+
+# Create plots for IBD networks
+p1.plot <- ggraph::ggraph(p1.graph, layout = "fr", weights = weight) + 
+  ggplot2::ggtitle("P1: 1800-1899") +
+  ggraph::geom_edge_link(aes(width = weight)) +
+  ggraph::scale_edge_width(range = c(0.1, 3)) +
+  ggraph::geom_node_point(
+    aes(size = tidygraph::centrality_pagerank()),
+    shape = 21,
+    fill = "green",
+    color = "black") +
+  ggplot2::theme(
+    plot.title = element_text(hjust = .5, size = 10),
+    legend.position = "none")
+p2.plot <- ggraph::ggraph(p2.graph, layout = "fr", weights = weight) + 
+  ggplot2::ggtitle("P2: 1900-1959") +
+  ggraph::geom_edge_link(aes(width = weight)) +
+  ggraph::scale_edge_width(range = c(0.1, 3)) +
+  ggraph::geom_node_point(
+    aes(size = tidygraph::centrality_pagerank()),
+    shape = 21,
+    fill = "green",
+    color = "black") +
+  ggplot2::theme(
+    plot.title = element_text(hjust = .5, size = 10),
+    legend.position = "none")
+p3.plot <- ggraph::ggraph(p3.graph, layout = "fr", weights = weight) + 
+  ggplot2::ggtitle("P3: 1960-Present") +
+  ggraph::geom_edge_link(aes(width = weight)) +
+  ggraph::scale_edge_width(range = c(0.1, 3)) +
+  ggraph::geom_node_point(
+    aes(size = tidygraph::centrality_pagerank()),
+    shape = 21,
+    fill = "green",
+    color = "black") +
+  ggplot2::theme(
+    plot.title = element_text(hjust = .5, size = 10),
+    legend.position = "none")
+dummy.plot <- ggraph::ggraph(p3.graph, layout = "fr", weights = weight) + 
+  ggraph::geom_edge_link(aes(width = weight)) +
+  ggraph::scale_edge_width(range = c(0.1, 3)) +
+  ggraph::geom_node_point(
+    aes(size = tidygraph::centrality_pagerank(), color = "green"),
+    show.legend = FALSE) +
+  ggplot2::labs(edge_width = "Prop. of Inh.")
+
+# Create stacked bar chart of accessions by whether they have any 3rd degree or
+# higher relationships.
+related.counts <- data.frame(
+  Period = c("P1", "P1", "P2", "P2", "P3", "P3"),
+  Related = c(
+    ">= 1",
+    "0",
+    ">= 1",
+    "0",
+    ">= 1",
+    "0"),
+  Accessions = c(
+    nrow(as_tibble(activate(p1.graph, nodes))),
+    nrow(p1.nodes) - nrow(as_tibble(activate(p1.graph, nodes))),
+    nrow(as_tibble(activate(p2.graph, nodes))),
+    nrow(p2.nodes) - nrow(as_tibble(activate(p2.graph, nodes))),
+    nrow(as_tibble(activate(p3.graph, nodes))),
+    nrow(p3.nodes) - nrow(as_tibble(activate(p3.graph, nodes)))))
+related.counts <- related.counts %>%
+  group_by(Period) %>%
+  arrange(Related) %>%
+  mutate(label_y = cumsum(Accessions))
+bar1.plot <- ggplot2::ggplot(
+  related.counts, aes(fill = Related, y = Accessions, x = Period)) +
+  ggplot2::ggtitle("Relationships") +
+  ggplot2::geom_bar(position="stack", stat="identity") +
+  ggplot2::geom_text(
+    aes(y = label_y, label = Accessions),
+    vjust = 1.2,
+    color = "white") +
+  ggplot2::theme(
+    plot.title = element_text(hjust = .5, size = 10),
+    legend.position = "top",
+    legend.margin=margin(t = 0, unit = "cm"),
+    legend.text = element_text(size = 8),
+    legend.title = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+
+# Create plot for PCoA
+p4.plot <- ggplot2::ggplot(data = eigenvec[!is.na(eigenvec$Period), ]) +
+  ggplot2::geom_point(
+    mapping = aes(x = `1`, y = `2`, color = as.factor(Period)),
+    show.legend = TRUE) +
+  ggplot2::scale_color_manual(
+    "Period",
+    values = c("1" = "yellow", "2" = "red", "3" = "blue")) +
+  ggplot2::geom_hline(yintercept = 0, linetype = "dotted") +
+  ggplot2::geom_vline(xintercept = 0, linetype = "dotted") +
+  ggplot2::labs(
+    title = "PCoA of apple cultivar SNPs",
+    x = paste0("PCoA Axis 1 (", eigen.perc[1], " %)"),
+    y = paste0("PCoA Axis 2 (", eigen.perc[2], " %)")) +
+  ggplot2::theme(legend.position = "top")
+
+# Create cowplot grid for IBD networks
+g1 <- cowplot::plot_grid(
+  bar1.plot,
+  p1.plot,
+  p2.plot,
+  p3.plot,
+  #cowplot::get_legend(dummy.plot),
+  nrow = 2,
+  ncol = 2,
+  labels = c("(a)", "(b)", "(c)", "(d)"),
+  label_size = 8,
+  label_fontfamily = "serif",
+  hjust = -.7,
+  vjust = 1.5,
+  scale = 1.05)
+
+cowplot::plot_grid(
+  g1, p4.plot,
+  labels = c("", "(e)"),
+  label_size = 8,
+  hjust = -.7,
+  vjust = 1.5)
+```
+
+## Discussion
+
+There are several caveats to this analysis. First, the time periods used were defined semi-arbitrarily. Ideally I would have defined time periods based on precisely when new breeding strategies were applied, but this information did not arise in my literature review. Second, my data set was not comprised of a random sample of cultivars from each period but instead of cultivars that happened to be preserved in the ABC. If preservation was non-random, then my results may be a biased measure of relatedness and diversity (in fact the ABC does have a geographic bias toward Canada and the US). Third, Plink's estimation of IBD is imperfect. Researchers have compared Plink to other methods and found significant differences (Stevens et al., 2011). That said, spot checking confirms that Plink's results are reasonable. For example, Plink identified [Sir Prize](https://pomiferous.com/applebyname/co-op-5-id-1464) and [Clear Gold](https://pomiferous.com/applebyname/clearwater-gold-id-1373) as having a $\hat{\pi}$ of `r scales::percent(round(p3.ibd[p3.ibd$Cultivar1 == "Sir Prize" & p3.ibd$Cultivar2 == "Clear Gold", ]$PI_HAT, digits = 2))` indicating a 1st degree relationship. This makes sense, since Clear Gold is a mutation of a Golden Delicious and Sir Prize is a cross between Golden Delicious and another cultivar. Finally, excluding triploid cultivars does limit the scope of these findings, since many commercially successful cultivars are triploid.
+
+Caveats aside, I think these results are cause for both concern and some peace of mind regarding apple cultivar genetic diversity. On the one hand, newly developed apple cultivars are becoming increasingly related to each other over time as indicated by an increase in both the proportion of cultivars with at least one third degree relationship or closer and an increase in the $\hat{\pi}$ of such cultivars. On the other hand, genetic diversity as measured by the genetic distance between cultivars does not seem to have changed over time. My speculative explanation of these two seemingly disparate results is that the high heterozygosity of apples may have prevented a decrease in genetic variation up to now despite the increasing relatedness of new cultivars. However, it's worth observing that the hamming distance of SNPs just measures the percentage of overall difference between accessions. Not all of these differences will be coding or pertain to commercially relevant phenotypes. I may have reached a different conclusion if I had focused only on SNPs that code for relevant traits. 
+
+## Conclusion
+
+``` {r save_pngs, echo=FALSE, results=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+# Save plot pngs
+png(file = "./Pngs/p1.plot.png")
+p1.plot
+dev.off()
+png(file = "./Pngs/p2.plot.png")
+p2.plot
+dev.off()
+png(file = "./Pngs/p3.plot.png")
+p3.plot
+dev.off()
+png(file = "./Pngs/p4.plot.png")
+p4.plot
+dev.off()
+png(file = "./Pngs/bar1.plot.png")
+bar1.plot
+dev.off()
+png(file = "./Pngs/net.legend.png")
+plot(cowplot::get_legend(dummy.plot))
+dev.off()
+```
+
+While it is comforting to know that we are not at a stage of apple domestication where breeding has significantly constrained genetic diversity, I would still advocate for continued preservation of heritage apple cultivars. Although modern breeding strategies have not yet significantly constrained apple genetic diversity, they may in the future and in that case being able to select for new traits from heritage cultivars will be important. Also, I'd argue that heritage cultivars represent a window into what phenotypes people found valuable in the past, which is in a sense a type of cultural heritage that in my opinion is worth preserving.
+
+## Reference List
+
+Khan, A., Gutierrez, B., Chao, C.T., & Singh, J. (2021) [Origin of the Domesticated Apples](https://link-springer-com.iclibezp1.cc.ic.ac.uk/chapter/10.1007/978-3-030-74682-7_17). In: Podwyszyńska, M., & Marasek-Ciołakowska, A. (eds.) (2021) *The Apple Genome*. Springer Cham, pp. 383-394.
+
+Migicovsky, Z., Douglas, G.M., & Myles, S. (2022) [Genotyping-by-sequencing of Canada’s apple biodiversity collection](https://doi.org/10.3389/fgene.2022.934712). *Genomics of Plants and the Phytoecosystem*. 13.
+
+Migicovsky, Z., Gardner, K.M., Richards, C., Chao, C.T., Schwaninger, H.R., Fazio, G., Zhong, G., & Myles, S. (2021) [Genomic consequences of apple improvement](https://doi.org/10.1038/s41438-020-00441-7). *Horticultural Research*. 8.
+
+O'Rourke, D. (2021) [Economic Importance of the World Apple Industry](https://link-springer-com.iclibezp1.cc.ic.ac.uk/chapter/10.1007/978-3-030-74682-7_1). In: Podwyszyńska, M., & Marasek-Ciołakowska, A. (eds.) (2021) *The Apple Genome*. Springer Cham, pp. 1-18.
+
+Stevens, E.L.,Heckenberg, G., Roberson, E.D.O., Baugher, J.D., Downey, T.J., & Pevsner, J. (2011) [Inference of Relationships in Population Data Using Identity-by-Descent and Identity-by-State](https://doi.org/10.1371/journal.pgen.1002287). Plos Genetics. 
+
+Volk, G., Cornille, A., Durel, C., & Gutierrez, B. (2021) 
+[Botany, Taxonomy, and Origins of the Apple](https://link-springer-com.iclibezp1.cc.ic.ac.uk/chapter/10.1007/978-3-030-74682-7_2). In: Podwyszyńska, M., & Marasek-Ciołakowska, A. (eds.) (2021) *The Apple Genome*. Springer Cham, pp. 19-32.
+
+Watts, S., Migicovsky, Z., McClure, K., Yu, C., Amyotte, B., Baker, T., et al. (2021) [Quantifying apple diversity: A phenomic characterization of Canada’s Apple Biodiversity Collection](https://doi.org/10.1002/ppp3.10211). *Plants People Planet*. 3 (6), 747-760.
+
+\newpage
+## Working Style Assessment
+
+I enjoyed working on this mini project quite a bit. Overall it confirmed a lot of what I know about the pros and cons of my working style.
+
+On the pro side, I found it deeply satisfying to learn about so many different subjects, whether that was a specific research topic like apples, a broad field like genomics, or technical details like genomic analysis software or ordination. Far from being a chore, each time my analysis hit a snag and I needed to learn about a new subject, I was excited to tackle that challenge. I was also able to pivot effectively and make judicious decisions about when to cut my losses rather than keep investing time in a losing approach. For example, after developing some background in apples as a subject area and finding the SNP data, my initial plan was to use it to conduct a Genome Wide Association Study. However, by the end of a full day of work I had run into a lot of technical and interpretive snags that I was worried I wouldn't be able to solve in the limited time available to me. Although I was quite frustrated, I had the presence of mind to not push my luck and work down to the wire hoping to resolve these issues. I also didn't throw away all of the background I had developed. Instead, I pivoted to conducting an analysis that still relied on SNP data and still answered an interesting question, but used simpler functions and relied on more easily interpreted approaches. This decision allowed me to complete the bulk of the work by the end of the first week and spend the next week polishing my draft and writing the presentation.
+
+On the con side, I did at times exhibit downsides of the curiosity I have for the subjects I was learning: analysis paralysis and chasing after shiny objects. I'm well acquainted with both dynamics from my years working in analytical roles in tech and I and pretty much any other analyst will occasionally be caught up in them. Analysis paralysis describes a situation in which the analyst continues to assess a problem from different angles far past the point of diminishing returns when it would be preferable to simply pick an approach and move on. Chasing after shiny objects involves an analyst getting excited by some interesting, but ultimately inconsequential piece of information or technique. Overall I didn't get too sunk into either, but certainly there were moments when I found myself doing one or the other (e.g., I caught myself reading a textbook on Network Analysis chapter-by-chapter when really all that was necessary and practicable given the scope of this project and the time limit was skimming for relevant content). In my experience, this kind of thing usually happens when someone is a bit stressed or tired and the best solution is to simply close your laptop and take a walk.
+
+This leaves me feeling ready to tackle my full research project. Certainly making good decisions about time usage and being willing and able to pivot if I hit snags will come in handy in the full research project. Overall I'm really enjoying putting together the technical and subject area expertise I've developed so far in the program and applying them to interesting problems. I think I'm going into it with the right attitude and the skills to succeed.
+
+
+

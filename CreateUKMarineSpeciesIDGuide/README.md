@@ -1,0 +1,1 @@
+Simple Python script to scrape the Marine Life Information Network website for UK marine species information and collate it into a document to be printed out and used to identify species during vouchering and morphosorting of large motile organisms.
